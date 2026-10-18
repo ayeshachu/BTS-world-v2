@@ -11,49 +11,61 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
+      - name: Setup Java
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Flutter
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      - name: Extract uploaded project ZIP
+      - name: Extract project ZIP
         run: |
-          test -f BTS_Army_World_V2_Design_Update.zip
           mkdir app
           unzip -q BTS_Army_World_V2_Design_Update.zip -d app
           test -f app/pubspec.yaml
 
-      - name: Get Flutter dependencies
+      - name: Install dependencies
         working-directory: app
         run: flutter pub get
 
-      - name: Build test APK
+      - name: Fix wallpaper plugin namespace
+        run: |
+          PLUGIN="$HOME/.pub-cache/hosted/pub.dev/flutter_wallpaper_manager-0.0.4/android/build.gradle"
+          if [ ! -f "$PLUGIN" ]; then
+            echo "Wallpaper plugin build.gradle not found at $PLUGIN"
+            exit 1
+          fi
+          if ! grep -q 'namespace' "$PLUGIN"; then
+            sed -i '/android[[:space:]]*{/a\    namespace "com.example.flutter_wallpaper_manager"' "$PLUGIN"
+          fi
+          grep -n 'namespace' "$PLUGIN"
+
+      - name: Build APK
         working-directory: app
         run: flutter build apk --release
 
-      - name: Build Android App Bundle
+      - name: Build AAB
         working-directory: app
         run: flutter build appbundle --release
 
-      - name: Save build files for download
-        if: always()
+      - name: Upload build files
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: BTS-Army-World-V2-builds
+          name: BTS-Army-World-V2
           path: |
             app/build/app/outputs/flutter-apk/*.apk
             app/build/app/outputs/bundle/release/*.aab
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 7
           
