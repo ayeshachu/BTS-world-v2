@@ -1,0 +1,94 @@
+name: Test BTS Army World V2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Extract project ZIP
+        run: |
+          mkdir app
+          unzip -q BTS_Army_World_V2_Design_Update.zip -d app
+          test -f app/pubspec.yaml
+
+      - name: Install dependencies
+        working-directory: app
+        run: flutter pub get
+
+      - name: Patch legacy wallpaper plugin namespace
+        working-directory: app
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLUGIN_DIR="$HOME/.pub-cache/hosted/pub.dev/flutter_wallpaper_manager-0.0.4/android"
+          PLUGIN_GRADLE="$PLUGIN_DIR/build.gradle"
+          PLUGIN_MANIFEST="$PLUGIN_DIR/src/main/AndroidManifest.xml"
+
+          if [ ! -f "$PLUGIN_GRADLE" ]; then
+            echo "ERROR: Plugin Gradle file not found: $PLUGIN_GRADLE"
+            find "$HOME/.pub-cache" -path '*/flutter_wallpaper_manager*/android/build.gradle' -print
+            exit 1
+          fi
+
+          if grep -qE '^[[:space:]]*namespace[[:space:]]' "$PLUGIN_GRADLE"; then
+            echo "Plugin already declares a namespace:"
+            grep -nE '^[[:space:]]*namespace[[:space:]]' "$PLUGIN_GRADLE"
+          else
+            PACKAGE_NAME=""
+            if [ -f "$PLUGIN_MANIFEST" ]; then
+              PACKAGE_NAME="$(sed -n 's/.*<manifest[^>]*package=["'"']\([^"'"']*\)["'"'].*>.*/\1/p' "$PLUGIN_MANIFEST" | head -n 1)"
+            fi
+            if [ -z "$PACKAGE_NAME" ]; then
+              PACKAGE_NAME="com.example.flutter_wallpaper_manager"
+              echo "Manifest package not found; using fallback namespace $PACKAGE_NAME"
+            else
+              echo "Using manifest package as namespace: $PACKAGE_NAME"
+            fi
+            sed -i "/^[[:space:]]*android[[:space:]]*{/a\    namespace '$PACKAGE_NAME'" "$PLUGIN_GRADLE"
+          fi
+
+          echo "Patched plugin Gradle file:"
+          sed -n '1,100p' "$PLUGIN_GRADLE"
+
+      - name: Build APK
+        working-directory: app
+        run: flutter build apk --release
+
+      - name: Build AAB
+        working-directory: app
+        run: flutter build appbundle --release
+
+      - name: Upload build files
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BTS-Army-World-V2
+          path: |
+            app/build/app/outputs/flutter-apk/*.apk
+            app/build/app/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 7
+          
