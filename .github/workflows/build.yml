@@ -29,26 +29,38 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Check project ZIP
+      - name: Extract Flutter project ZIP
+        shell: bash
         run: |
           set -euo pipefail
-          test -f BTS_Army_World_V2_Design_Update.zip
+
+          ZIP_FILE="BTS_Army_World_V2_Design_Update.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: Project ZIP not found: $ZIP_FILE"
+            ls -la
+            exit 1
+          fi
+
           mkdir -p app
-          unzip -q BTS_Army_World_V2_Design_Update.zip -d app
+          unzip -q "$ZIP_FILE" -d app
 
           if [ ! -f app/pubspec.yaml ]; then
-            PROJECT_DIR="$(find app -name pubspec.yaml -print -quit | xargs -r dirname)"
-            if [ -z "$PROJECT_DIR" ]; then
-              echo "ERROR: pubspec.yaml not found in ZIP"
+            PROJECT_FILE="$(find app -name pubspec.yaml -print -quit)"
+
+            if [ -z "$PROJECT_FILE" ]; then
+              echo "ERROR: pubspec.yaml not found inside ZIP"
               exit 1
             fi
+
+            PROJECT_DIR="$(dirname "$PROJECT_FILE")"
             cp -a "$PROJECT_DIR/." app/
           fi
 
           test -f app/pubspec.yaml
-          echo "Flutter project found."
+          echo "Flutter project extracted successfully."
 
-      - name: Install dependencies
+      - name: Install Flutter dependencies
         working-directory: app
         run: flutter pub get
 
@@ -64,10 +76,16 @@ jobs:
           import xml.etree.ElementTree as ET
 
           cache = Path.home() / ".pub-cache/hosted/pub.dev"
-          files = list(cache.glob("flutter_wallpaper_manager-*/android/build.gradle"))
+          files = list(
+              cache.glob("flutter_wallpaper_manager-*/android/build.gradle")
+          )
+          files += list(
+              cache.glob("flutter_wallpaper_manager-*/android/build.gradle.kts")
+          )
 
           if not files:
-              raise SystemExit("ERROR: flutter_wallpaper_manager Gradle file not found")
+              print("Wallpaper plugin Gradle file not found; skipping patch.")
+              raise SystemExit(0)
 
           gradle = files[0]
           manifest = gradle.parent / "src/main/AndroidManifest.xml"
@@ -79,24 +97,151 @@ jobs:
                       "package", package_name
                   )
               except ET.ParseError:
-                  print("Warning: plugin manifest could not be parsed.")
+                  print("Warning: Could not parse plugin manifest.")
 
           content = gradle.read_text()
 
           if not re.search(r"^\s*namespace\s+", content, re.MULTILINE):
+              if gradle.suffix == ".kts":
+                  namespace_line = f'    namespace = "{package_name}"'
+              else:
+                  namespace_line = f"    namespace '{package_name}'"
+
               updated, count = re.subn(
                   r"(\bandroid\s*\{)",
-                  lambda match: match.group(1) + "\n    namespace '" + package_name + "'",
+                  lambda match: match.group(1) + "\n" + namespace_line,
                   content,
                   count=1,
               )
 
               if count == 0:
-                  raise SystemExit("ERROR: Could not find android block in plugin Gradle file")
+                  raise SystemExit(
+                      "ERROR: Could not find android block in wallpaper plugin."
+                  )
 
               gradle.write_text(updated)
 
-          print("Namespace patch checked:", package_name)
+          print("Wallpaper plugin namespace checked:", package_name)
+          PY
+
+      - name: Enable core library desugaring
+        working-directory: app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          groovy = Path("android/app/build.gradle")
+          kotlin = Path("android/app/build.gradle.kts")
+
+          if groovy.exists():
+              path = groovy
+              content = path.read_text()
+
+              if not re.search(
+                  r"coreLibraryDesugaringEnabled\s+true",
+                  content
+              ):
+                  if re.search(r"\bcompileOptions\s*\{", content):
+                      content = re.sub(
+                          r"\bcompileOptions\s*\{",
+                          "compileOptions {\n"
+                          "        coreLibraryDesugaringEnabled true",
+                          content,
+                          count=1,
+                      )
+                  else:
+                      content = re.sub(
+                          r"\bandroid\s*\{",
+                          "android {\n"
+                          "    compileOptions {\n"
+                          "        coreLibraryDesugaringEnabled true\n"
+                          "    }",
+                          content,
+                          count=1,
+                      )
+
+              if not re.search(
+                  r"\bcoreLibraryDesugaring\s+['\"]",
+                  content
+              ):
+                  dependency = (
+                      "    coreLibraryDesugaring "
+                      "'com.android.tools:desugar_jdk_libs:2.1.4'"
+                  )
+
+                  if re.search(r"\bdependencies\s*\{", content):
+                      content = re.sub(
+                          r"\bdependencies\s*\{",
+                          lambda match: match.group(0) + "\n" + dependency,
+                          content,
+                          count=1,
+                      )
+                  else:
+                      content += (
+                          "\n"
+                          "dependencies {\n"
+                          + dependency
+                          + "\n}\n"
+                      )
+
+              path.write_text(content)
+
+          elif kotlin.exists():
+              path = kotlin
+              content = path.read_text()
+
+              if "isCoreLibraryDesugaringEnabled" not in content:
+                  if re.search(r"\bcompileOptions\s*\{", content):
+                      content = re.sub(
+                          r"\bcompileOptions\s*\{",
+                          "compileOptions {\n"
+                          "        isCoreLibraryDesugaringEnabled = true",
+                          content,
+                          count=1,
+                      )
+                  else:
+                      content = re.sub(
+                          r"\bandroid\s*\{",
+                          "android {\n"
+                          "    compileOptions {\n"
+                          "        isCoreLibraryDesugaringEnabled = true\n"
+                          "    }",
+                          content,
+                          count=1,
+                      )
+
+              if "coreLibraryDesugaring(" not in content:
+                  dependency = (
+                      '    coreLibraryDesugaring('
+                      '"com.android.tools:desugar_jdk_libs:2.1.4")'
+                  )
+
+                  if re.search(r"\bdependencies\s*\{", content):
+                      content = re.sub(
+                          r"\bdependencies\s*\{",
+                          lambda match: match.group(0) + "\n" + dependency,
+                          content,
+                          count=1,
+                      )
+                  else:
+                      content += (
+                          "\ndependencies {\n"
+                          + dependency
+                          + "\n}\n"
+                      )
+
+              path.write_text(content)
+
+          else:
+              raise SystemExit(
+                  "ERROR: Android app Gradle file not found."
+              )
+
+          print("Core library desugaring configured.")
           PY
 
       - name: Build release APK
