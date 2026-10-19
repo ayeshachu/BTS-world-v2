@@ -1,8 +1,9 @@
-name: Test BTS Army World V2
+name: BTS Army World V2 CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -17,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
@@ -28,67 +29,91 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Extract project ZIP
+      - name: Check project ZIP
         run: |
-          mkdir app
+          set -euo pipefail
+          test -f BTS_Army_World_V2_Design_Update.zip
+          mkdir -p app
           unzip -q BTS_Army_World_V2_Design_Update.zip -d app
+
+          if [ ! -f app/pubspec.yaml ]; then
+            PROJECT_DIR="$(find app -name pubspec.yaml -print -quit | xargs -r dirname)"
+            if [ -z "$PROJECT_DIR" ]; then
+              echo "ERROR: pubspec.yaml not found in ZIP"
+              exit 1
+            fi
+            cp -a "$PROJECT_DIR/." app/
+          fi
+
           test -f app/pubspec.yaml
+          echo "Flutter project found."
 
       - name: Install dependencies
         working-directory: app
         run: flutter pub get
 
-      - name: Patch legacy wallpaper plugin namespace
+      - name: Patch wallpaper plugin namespace
         working-directory: app
         shell: bash
         run: |
           set -euo pipefail
-          PLUGIN_DIR="$HOME/.pub-cache/hosted/pub.dev/flutter_wallpaper_manager-0.0.4/android"
-          PLUGIN_GRADLE="$PLUGIN_DIR/build.gradle"
-          PLUGIN_MANIFEST="$PLUGIN_DIR/src/main/AndroidManifest.xml"
 
-          if [ ! -f "$PLUGIN_GRADLE" ]; then
-            echo "ERROR: Plugin Gradle file not found: $PLUGIN_GRADLE"
-            find "$HOME/.pub-cache" -path '*/flutter_wallpaper_manager*/android/build.gradle' -print
-            exit 1
-          fi
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+          import xml.etree.ElementTree as ET
 
-          if grep -qE '^[[:space:]]*namespace[[:space:]]' "$PLUGIN_GRADLE"; then
-            echo "Plugin already declares a namespace:"
-            grep -nE '^[[:space:]]*namespace[[:space:]]' "$PLUGIN_GRADLE"
-          else
-            PACKAGE_NAME=""
-            if [ -f "$PLUGIN_MANIFEST" ]; then
-              PACKAGE_NAME="$(sed -n 's/.*<manifest[^>]*package=["'"']\([^"'"']*\)["'"'].*>.*/\1/p' "$PLUGIN_MANIFEST" | head -n 1)"
-            fi
-            if [ -z "$PACKAGE_NAME" ]; then
-              PACKAGE_NAME="com.example.flutter_wallpaper_manager"
-              echo "Manifest package not found; using fallback namespace $PACKAGE_NAME"
-            else
-              echo "Using manifest package as namespace: $PACKAGE_NAME"
-            fi
-            sed -i "/^[[:space:]]*android[[:space:]]*{/a\    namespace '$PACKAGE_NAME'" "$PLUGIN_GRADLE"
-          fi
+          cache = Path.home() / ".pub-cache/hosted/pub.dev"
+          files = list(cache.glob("flutter_wallpaper_manager-*/android/build.gradle"))
 
-          echo "Patched plugin Gradle file:"
-          sed -n '1,100p' "$PLUGIN_GRADLE"
+          if not files:
+              raise SystemExit("ERROR: flutter_wallpaper_manager Gradle file not found")
 
-      - name: Build APK
+          gradle = files[0]
+          manifest = gradle.parent / "src/main/AndroidManifest.xml"
+          package_name = "com.example.flutter_wallpaper_manager"
+
+          if manifest.exists():
+              try:
+                  package_name = ET.parse(manifest).getroot().attrib.get(
+                      "package", package_name
+                  )
+              except ET.ParseError:
+                  print("Warning: plugin manifest could not be parsed.")
+
+          content = gradle.read_text()
+
+          if not re.search(r"^\s*namespace\s+", content, re.MULTILINE):
+              updated, count = re.subn(
+                  r"(\bandroid\s*\{)",
+                  lambda match: match.group(1) + "\n    namespace '" + package_name + "'",
+                  content,
+                  count=1,
+              )
+
+              if count == 0:
+                  raise SystemExit("ERROR: Could not find android block in plugin Gradle file")
+
+              gradle.write_text(updated)
+
+          print("Namespace patch checked:", package_name)
+          PY
+
+      - name: Build release APK
         working-directory: app
         run: flutter build apk --release
 
-      - name: Build AAB
+      - name: Build Android App Bundle
         working-directory: app
         run: flutter build appbundle --release
 
-      - name: Upload build files
+      - name: Upload APK and AAB
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: BTS-Army-World-V2
+          name: BTS-Army-World-V2-Android
           path: |
             app/build/app/outputs/flutter-apk/*.apk
             app/build/app/outputs/bundle/release/*.aab
           if-no-files-found: error
           retention-days: 7
-          
